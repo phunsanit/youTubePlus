@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
+
+# Build outputs
+*.zip
+dist/
+
+# Sensitive config - use config.example.json as template
+config.json

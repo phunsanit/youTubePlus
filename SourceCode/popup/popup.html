@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="popup.css">
+  <title>YouTube Plus</title>
+</head>
+
+<body>
+  <div class="container">
+    <header>
+      <h1>You Tube Plus</h1>
+      <button id="auth-btn" class="hidden">Connect to YouTube</button>
+    </header>
+    <div class="action-bar">
+      <button id="add-all-btn" disabled>Save All to Watch Later</button>
+    </div>
+    <div id="tab-list" class="tab-list">
+      <!-- Tabs will be injected here -->
+      <div class="loading">Scanning for tabs...</div>
+    </div>
+    <div id="debug-info" class="debug-info"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+
+</html>
