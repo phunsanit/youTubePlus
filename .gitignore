@@ -15,3 +15,8 @@ dist/
 
 # Sensitive config - use config.example.json as template
 config.json
+
+# Google Secrets and Config Files
+client_secret_*.json
+config/*.json
+.env

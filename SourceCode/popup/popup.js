@@ -46,7 +46,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // Find Open YouTube Tabs
-    browserAPI.tabs.query({ url: "*://*.youtube.com/watch*" }, (tabs) => {
+    browserAPI.tabs.query({ url: "*://*.youtube.com/watch*" }, async (tabs) => {
         tabList.innerHTML = '';
         detectedVideos = [];
 
@@ -55,17 +55,60 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        tabs.forEach(tab => {
-            const videoId = getVideoId(tab.url);
-            if (videoId) {
-                detectedVideos.push({
-                    id: videoId,
-                    title: tab.title.replace(' - YouTube', ''),
-                    tabId: tab.id
-                });
-            }
-        });
+        // Show loading state while fetching headers
+        tabList.innerHTML = '<div class="loading">Scanning channel names...</div>';
 
+        // Process tabs in parallel to fetch channel names
+        const processedVideos = await Promise.all(tabs.map(async (tab) => {
+            const videoId = getVideoId(tab.url);
+            if (!videoId) return null;
+
+            let channelName = 'Detected';
+            try {
+                const result = await browserAPI.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: () => {
+                        const selectors = [
+                            '#owner-name a',
+                            'ytd-channel-name #text a',
+                            '.ytd-channel-name a',
+                            '#upload-info #channel-name a',
+                            'ytd-video-owner-renderer #channel-name #text-container a',
+                            '#meta-contents ytd-channel-name a',
+                            // Mobile/Responsive view fallback
+                            '.slim-owner-icon-and-title a'
+                        ];
+
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.innerText && el.innerText.trim().length > 0) {
+                                return el.innerText.trim();
+                            }
+                        }
+                        return null;
+                    }
+                });
+
+                if (result && result[0] && result[0].result) {
+                    channelName = result[0].result;
+                }
+            } catch (e) {
+                // script execution might fail if page isn't fully loaded or permissions issue
+                console.log('Failed to get channel name for tab', tab.id);
+            }
+
+            return {
+                id: videoId,
+                title: tab.title.replace(' - YouTube', ''),
+                tabId: tab.id,
+                channel: channelName
+            };
+        }));
+
+        detectedVideos = processedVideos.filter(v => v !== null);
+
+        // Clear loading message
+        tabList.innerHTML = '';
         renderVideos();
         updateButtons();
     });
@@ -80,7 +123,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         <img class="video-thumb" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="Thumbnail">
         <div class="video-info">
           <div class="video-title" title="${video.title}">${video.title}</div>
-          <div class="video-channel">Detected</div>
+          <div class="video-channel">${video.channel}</div>
         </div>
         <button class="add-btn" data-id="${video.id}" data-tab-id="${video.tabId}" title="Save & Close">+</button>
       `;
@@ -313,6 +356,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Add video to playlist
     async function addToMyWatchLater(videoId, btnElement, isRetry = false) {
+        // Stop immediately if quota is already known to be exceeded
+        if (window.isQuotaExceeded) {
+            btnElement.textContent = '!';
+            btnElement.title = 'Quota Exceeded - Process Stopped';
+            return false;
+        }
+
         try {
             if (!isRetry) {
                 btnElement.textContent = '...';
@@ -401,33 +451,33 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const errorReason = error.error?.errors?.[0]?.reason || '';
 
                 // SPECIFIC CHECK FOR DAILY QUOTA EXCEEDED
-                if (errorReason === 'quotaExceeded' || errorMsg.includes('quota')) {
-                    // Stop everything - Global Flag (even though we can't stop Promise.all mid-flight, this prevents retries)
-                    if (!window.isQuotaExceeded) {
-                        window.isQuotaExceeded = true;
+                if (errorReason === 'quotaExceeded' || errorMsg.includes('quota') || response.status === 403) {
+                    // Set global flag
+                    window.isQuotaExceeded = true;
 
-                        const quotaMsg = 'Daily Limit Reached (quotaExceeded). Stopped.';
-                        console.error(quotaMsg);
+                    const quotaMsg = 'Daily Limit Reached. <a href="https://developers.google.com/youtube/v3/getting-started#quota" target="_blank">Why?</a>';
+                    console.error('Quota Exceeded Detected!', errorMsg);
 
-                        const errContainer = document.getElementById('error-container');
-                        if (errContainer) {
-                            errContainer.innerHTML = `
-                                <span>${quotaMsg}</span>
-                                <a href="https://developers.google.com/youtube/v3/getting-started#quota" target="_blank">Help</a>
-                            `;
-                            errContainer.classList.remove('hidden');
-                        }
+                    // Force UI Update - Try to find container directly
+                    const errContainer = document.querySelector('.error-container') || document.getElementById('error-container');
+                    if (errContainer) {
+                        errContainer.innerHTML = `<span>${quotaMsg}</span>`;
+                        errContainer.setAttribute('style', 'display: block !important;'); // Inline style to override any class issues
+                        errContainer.classList.remove('hidden');
+                    } else {
+                        console.error('CRITICAL: Error container not found in DOM.');
+                    }
 
-                        // Disable the main button immediately
-                        const mainBtn = document.getElementById('add-all-btn');
-                        if (mainBtn) {
-                            mainBtn.textContent = 'Stopped (Quota Limit)';
-                            mainBtn.disabled = true;
-                        }
+                    // Disable the main button immediately
+                    const mainBtn = document.getElementById('add-all-btn');
+                    if (mainBtn) {
+                        mainBtn.textContent = 'Stopped (Quota Limit)';
+                        mainBtn.disabled = true;
+                        mainBtn.classList.remove('active');
                     }
 
                     btnElement.textContent = '!';
-                    btnElement.title = 'Quota Exceeded';
+                    btnElement.title = 'Quota Exceeded - Process Stopped';
                     return false;
                 }
 
