@@ -1,0 +1,54 @@
+{
+    "manifest_version": 3,
+    "name": "YouTubePlus",
+    "version": "1.0",
+    "description": "Find open YouTube tabs and add videos to Watch Later.",
+    "permissions": [
+        "tabs",
+        "activeTab",
+        "scripting",
+        "storage",
+        "identity"
+    ],
+    "host_permissions": [
+        "https://www.googleapis.com/*",
+        "https://www.youtube.com/*",
+        "https://accounts.google.com/*",
+        "https://oauth2.googleapis.com/*"
+    ],
+    "content_scripts": [
+        {
+            "matches": [
+                "*://*.youtube.com/watch*"
+            ],
+            "js": [
+                "content/content.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
+    "action": {
+        "default_popup": "popup/popup.html",
+        "default_icon": {
+            "16": "assets/icon16.png",
+            "48": "assets/icon48.png",
+            "128": "assets/icon128.png"
+        }
+    },
+    "background": {
+        "scripts": [
+            "background/background.js"
+        ]
+    },
+    "icons": {
+        "16": "assets/icon16.png",
+        "48": "assets/icon48.png",
+        "128": "assets/icon128.png"
+    },
+    "browser_specific_settings": {
+        "gecko": {
+            "id": "youtubeplus@phunsanit.dev",
+            "strict_min_version": "109.0"
+        }
+    }
+}
