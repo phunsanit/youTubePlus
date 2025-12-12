@@ -44,7 +44,7 @@
         "128": "assets/icon128.jpeg"
     },
     "oauth2": {
-        "client_id": "465282825902-mcrroh384fiam3956hjs1tnuj2r1shld.apps.googleusercontent.com",
+        "client_id": "465282825902-261he9nrja0fvm87an9m1gke4q6dhd2v.apps.googleusercontent.com",
         "scopes": [
             "https://www.googleapis.com/auth/youtube.force-ssl"
         ]

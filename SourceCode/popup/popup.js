@@ -23,14 +23,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log('Config load skipped (Chrome uses manifest)');
     }
 
-    // Show redirect URL for Firefox
+    // Show redirect URL for Firefox - REMOVED for production
     if (isFirefox && typeof browser !== 'undefined' && browser.identity) {
+        /* Debug info hidden for production
         const debugInfo = document.getElementById('debug-info');
-        const redirectUrl = browser.identity.getRedirectURL();
-        debugInfo.innerHTML = `
-      <strong>📋 Redirect URL:</strong><br>
-      <code style="word-break:break-all;user-select:all;">${redirectUrl}</code>
-    `;
+        if (debugInfo) debugInfo.style.display = 'none';
+        */
     }
 
     // Load token from storage on startup
@@ -79,7 +77,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             card.dataset.tabId = video.tabId;
             // Use i.ytimg.com and default.jpg for maximum compatibility
             card.innerHTML = `
-        // Use hqdefault which is generally available and better quality
         <img class="video-thumb" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="Thumbnail">
         <div class="video-info">
           <div class="video-title" title="${video.title}">${video.title}</div>
@@ -105,7 +102,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             card.querySelector('.add-btn').addEventListener('click', async (e) => {
                 const result = await addToMyWatchLater(video.id, e.target);
                 if (result) {
-                    browserAPI.tabs.remove(video.tabId);
+                    // Remove tab and card
+                    try {
+                        await browserAPI.tabs.remove(video.tabId);
+                    } catch (e) {
+                        console.log('Tab already closed:', video.tabId);
+                    }
                     card.remove();
                     detectedVideos = detectedVideos.filter(v => v.tabId !== video.tabId);
                     updateButtons();
@@ -149,52 +151,32 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
 
-            const clientId = config?.client_id;
-            if (!clientId || clientId.includes('YOUR_CLIENT_ID')) {
-                reject(new Error('Configure client_id in config.json'));
-                return;
+            // Delegate to background script
+            if (interactive) {
+                // Fire and forget - NO callback to prevent "Actor 'Conduits' destroyed" error
+                browserAPI.runtime.sendMessage({
+                    action: 'login',
+                    interactive: true
+                });
+                reject(new Error('Authentication started. Please sign in via the new window, then click "+" again.'));
+            } else {
+                // Silent check - wait for callback
+                browserAPI.runtime.sendMessage({
+                    action: 'login',
+                    interactive: false
+                }, (response) => {
+                    if (browserAPI.runtime.lastError) {
+                        reject(new Error(browserAPI.runtime.lastError.message));
+                        return;
+                    }
+                    if (response && response.success) {
+                        cachedToken = response.token;
+                        resolve(response.token);
+                    } else {
+                        reject(new Error(response?.error || 'Silent auth failed'));
+                    }
+                });
             }
-
-            // Use native API
-            const redirectUrl = browser.identity.getRedirectURL();
-            const scopes = 'https://www.googleapis.com/auth/youtube.force-ssl';
-
-            console.log('Firefox OAuth Debug:');
-            console.log('- Client ID:', clientId);
-            console.log('- Redirect URL:', redirectUrl);
-
-            const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth' +
-                `?client_id=${encodeURIComponent(clientId)}` +
-                `&response_type=token` +
-                `&redirect_uri=${encodeURIComponent(redirectUrl)}` +
-                `&scope=${encodeURIComponent(scopes)}`;
-
-            console.log('- Launching Auth URL:', authUrl);
-
-            browser.identity.launchWebAuthFlow({
-                url: authUrl,
-                interactive: interactive
-            }).then(responseUrl => {
-                const url = new URL(responseUrl);
-                const params = new URLSearchParams(url.hash.substring(1));
-                const token = params.get('access_token');
-                if (token) {
-                    cachedToken = token;
-                    // Persist token
-                    browserAPI.storage.local.set({ oauth_token: token });
-                    resolve(token);
-                } else {
-                    reject(new Error('No token in response'));
-                }
-            }).catch(err => {
-                // Only log error if it was an interactive attempt or if it's a different kind of error
-                if (interactive) {
-                    console.error('Firefox OAuth error:', err);
-                } else {
-                    console.log('Silent auth failed, fallback to interactive needed.');
-                }
-                reject(err);
-            });
         });
     }
 
@@ -202,26 +184,69 @@ document.addEventListener('DOMContentLoaded', async () => {
         return isChrome ? getAuthTokenChrome(interactive) : getAuthTokenFirefox(interactive);
     }
 
-    // Get or create "My Watch Later" playlist
-    async function getOrCreatePlaylist(token) {
+    // Get the latest "My Watch Later" playlist (supporting N+1)
+    async function getLatestPlaylist(token) {
         if (myWatchLaterPlaylistId) return myWatchLaterPlaylistId;
 
-        // First, try to find existing playlist
-        const listResponse = await fetch(
-            'https://www.googleapis.com/youtube/v3/playlists?part=snippet&mine=true&maxResults=50',
-            { headers: { 'Authorization': `Bearer ${token}` } }
-        );
+        // Fetch ALL playlists to find the latest "My Watch Later X"
+        // ADDED: contentDetails to check itemCount
+        let allPlaylists = [];
+        let nextPageToken = '';
 
-        if (listResponse.ok) {
-            const data = await listResponse.json();
-            const existing = data.items?.find(p => p.snippet.title === PLAYLIST_NAME);
-            if (existing) {
-                myWatchLaterPlaylistId = existing.id;
-                return myWatchLaterPlaylistId;
-            }
+        try {
+            do {
+                const listUrl = `https://www.googleapis.com/youtube/v3/playlists?part=snippet,contentDetails&mine=true&maxResults=50&pageToken=${nextPageToken}`;
+                const response = await fetch(listUrl, { headers: { 'Authorization': `Bearer ${token}` } });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.items) allPlaylists.push(...data.items);
+                    nextPageToken = data.nextPageToken || '';
+                } else {
+                    break;
+                }
+            } while (nextPageToken);
+        } catch (e) {
+            console.error('Error fetching playlists:', e);
         }
 
-        // Create new playlist
+        // Filter for our playlists
+        const ourPlaylists = allPlaylists.filter(p => p.snippet.title.startsWith(PLAYLIST_NAME));
+
+        if (ourPlaylists.length > 0) {
+            // Sort by numerical suffix: "My Watch Later", "My Watch Later 2", ...
+            ourPlaylists.sort((a, b) => {
+                const numA = parseInt(a.snippet.title.replace(PLAYLIST_NAME, '').trim()) || 1;
+                const numB = parseInt(b.snippet.title.replace(PLAYLIST_NAME, '').trim()) || 1;
+                return numB - numA; // Descending
+            });
+
+            const latest = ourPlaylists[0];
+
+            // CHECK ITEM COUNT >= 200
+            if (latest.contentDetails.itemCount >= 200) {
+                console.log(`Playlist "${latest.snippet.title}" is full (${latest.contentDetails.itemCount} items). Creating next...`);
+
+                const currentNum = parseInt(latest.snippet.title.replace(PLAYLIST_NAME, '').trim()) || 1;
+                const nextName = `${PLAYLIST_NAME} ${currentNum + 1}`;
+
+                // Recursively check if next one exists (unlikely in this logic, but safe to create)
+                // Actually if sorted descending, latest is the highest. So nextName surely doesn't exist or is empty?
+                // Just create it.
+                return await createNewPlaylist(token, nextName);
+            }
+
+            myWatchLaterPlaylistId = latest.id;
+            console.log(`Found existing playlist: ${latest.snippet.title} (${latest.contentDetails.itemCount} items)`);
+            return myWatchLaterPlaylistId;
+        }
+
+        // Create new (first) playlist
+        return await createNewPlaylist(token, PLAYLIST_NAME);
+    }
+
+    // Create a NEW playlist with a specific name
+    async function createNewPlaylist(token, name) {
         const createResponse = await fetch(
             'https://www.googleapis.com/youtube/v3/playlists?part=snippet,status',
             {
@@ -231,13 +256,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    snippet: {
-                        title: PLAYLIST_NAME,
-                        description: 'Videos saved by YouTubePlus extension'
-                    },
-                    status: {
-                        privacyStatus: 'private'
-                    }
+                    snippet: { title: name, description: 'Videos saved by YouTubePlus extension' },
+                    status: { privacyStatus: 'private' }
                 })
             }
         );
@@ -245,17 +265,59 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (createResponse.ok) {
             const data = await createResponse.json();
             myWatchLaterPlaylistId = data.id;
-            return myWatchLaterPlaylistId;
+            console.log(`Created new playlist: ${name}`);
+            return data.id;
+        } else {
+            const err = await createResponse.json();
+            console.error('Failed to create playlist:', err);
+            throw new Error(err.error?.message || 'Failed to create playlist');
         }
+    }
 
-        throw new Error('Failed to create playlist');
+    // Handle "Playlist Full" -> Create N+1
+    async function rotateToNextPlaylist(token) {
+        // Reset ID to force refresh/create
+        myWatchLaterPlaylistId = null;
+
+        // Find current max index
+        // We re-fetch logic similar to getLatest, but this time we specifically want to create the NEXT one.
+        // Simplified: Just re-fetch latest list to be sure, then increment.
+
+        let allPlaylists = [];
+        let nextPageToken = '';
+        try {
+            do {
+                const listUrl = `https://www.googleapis.com/youtube/v3/playlists?part=snippet&mine=true&maxResults=50&pageToken=${nextPageToken}`;
+                const response = await fetch(listUrl, { headers: { 'Authorization': `Bearer ${token}` } });
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.items) allPlaylists.push(...data.items);
+                    nextPageToken = data.nextPageToken || '';
+                } else break;
+            } while (nextPageToken);
+        } catch (e) { }
+
+        const ourPlaylists = allPlaylists.filter(p => p.snippet.title.startsWith(PLAYLIST_NAME));
+        let maxIndex = 1;
+
+        ourPlaylists.forEach(p => {
+            const num = parseInt(p.snippet.title.replace(PLAYLIST_NAME, '').trim()) || 1;
+            if (num > maxIndex) maxIndex = num;
+        });
+
+        const nextName = `${PLAYLIST_NAME} ${maxIndex + 1}`;
+        console.log(`Playlist full. Rotating to: ${nextName}`);
+
+        return await createNewPlaylist(token, nextName);
     }
 
     // Add video to playlist
-    async function addToMyWatchLater(videoId, btnElement) {
+    async function addToMyWatchLater(videoId, btnElement, isRetry = false) {
         try {
-            btnElement.textContent = '...';
-            console.log(`Adding video ${videoId} to playlist...`);
+            if (!isRetry) {
+                btnElement.textContent = '...';
+                console.log(`Adding video ${videoId} to playlist...`);
+            }
 
             let token;
 
@@ -264,22 +326,40 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Attempting silent auth first (which involves a network call) can expire the user gesture
             // causing Firefox to block the subsequent interactive popup.
             if (cachedToken) {
-                try {
-                    console.log('Using cached token:', cachedToken);
-                    token = cachedToken;
-                    // Validate it quickly or assume valid? 
-                    // Let's try to use it. If 401, we'll handle it.
-                } catch (e) {
-                    token = await getAuthToken(true);
-                }
+                token = cachedToken;
             } else {
                 console.log('No cached token, forcing interactive auth to preserve user gesture');
                 token = await getAuthToken(true);
                 console.log('Token obtained (interactive)');
             }
 
-            const playlistId = await getOrCreatePlaylist(token);
+            // Use getLatestPlaylist instead of simple getOrCreate
+            const playlistId = await getLatestPlaylist(token);
             console.log('Target Playlist ID:', playlistId);
+
+            // CHECK IF ALREADY IN PLAYLIST
+            // If already present, return TRUE so the tab gets closed (per user request)
+            try {
+                const checkResponse = await fetch(
+                    `https://www.googleapis.com/youtube/v3/playlistItems?part=id&playlistId=${playlistId}&videoId=${videoId}`,
+                    { headers: { 'Authorization': `Bearer ${token}` } }
+                );
+
+                if (checkResponse.ok) {
+                    const checkData = await checkResponse.json();
+                    if (checkData.items && checkData.items.length > 0) {
+                        console.log(`Video ${videoId} already in playlist. Skipping add.`);
+                        btnElement.textContent = '✓';
+                        btnElement.style.color = '#00ff00';
+                        btnElement.disabled = true;
+                        // Return true => Close Tab
+                        return true;
+                    }
+                }
+            } catch (checkErr) {
+                console.warn('Failed to check duplicate:', checkErr);
+                // Continue to try adding if check fails
+            }
 
             const payload = {
                 snippet: {
@@ -316,7 +396,59 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else {
                 const error = await response.json();
                 console.error('API Error Details:', error);
-                console.error('Error Message:', error.error?.message);
+
+                const errorMsg = error.error?.message || 'Error ' + response.status;
+                const errorReason = error.error?.errors?.[0]?.reason || '';
+
+                // SPECIFIC CHECK FOR DAILY QUOTA EXCEEDED
+                if (errorReason === 'quotaExceeded' || errorMsg.includes('quota')) {
+                    // Stop everything - Global Flag (even though we can't stop Promise.all mid-flight, this prevents retries)
+                    if (!window.isQuotaExceeded) {
+                        window.isQuotaExceeded = true;
+
+                        const quotaMsg = 'Daily Limit Reached (quotaExceeded). Stopped.';
+                        console.error(quotaMsg);
+
+                        const errContainer = document.getElementById('error-container');
+                        if (errContainer) {
+                            errContainer.innerHTML = `
+                                <span>${quotaMsg}</span>
+                                <a href="https://developers.google.com/youtube/v3/getting-started#quota" target="_blank">Help</a>
+                            `;
+                            errContainer.classList.remove('hidden');
+                        }
+
+                        // Disable the main button immediately
+                        const mainBtn = document.getElementById('add-all-btn');
+                        if (mainBtn) {
+                            mainBtn.textContent = 'Stopped (Quota Limit)';
+                            mainBtn.disabled = true;
+                        }
+                    }
+
+                    btnElement.textContent = '!';
+                    btnElement.title = 'Quota Exceeded';
+                    return false;
+                }
+
+                // DETECT PLAYLIST FULL (Item count limit)
+                // "playlistContainsMaximumNumberOfVideos", etc.
+                if (!isRetry && (
+                    response.status === 409 ||
+                    (response.status === 403 && errorReason === 'playlistContainsMaximumNumberOfVideos') ||
+                    errorMsg.includes('maximum number of videos')
+                )) {
+                    console.warn('Playlist limit reached? Rotating to next...');
+                    try {
+                        await rotateToNextPlaylist(token); // Create "My Watch Later N+1"
+                        return await addToMyWatchLater(videoId, btnElement, true); // Retry recursive
+                    } catch (e) {
+                        console.error('Rotation failed:', e);
+                        btnElement.textContent = '!';
+                        btnElement.title = 'Failed to rotate playlist';
+                        return false;
+                    }
+                }
 
                 // If token invalid, clear cache
                 if (response.status === 401) {
@@ -324,47 +456,79 @@ document.addEventListener('DOMContentLoaded', async () => {
                     cachedToken = null;
                     browserAPI.storage.local.remove('oauth_token');
                     if (isChrome) chrome.identity.removeCachedAuthToken({ token });
-
-                    // Optional: could retry once here, but maybe too complex for now
                 }
 
+                console.error('Error Message:', errorMsg);
                 btnElement.textContent = '!';
-                btnElement.title = error.error?.message || 'Error ' + response.status;
+                btnElement.title = errorMsg;
                 return false;
             }
         } catch (err) {
-            console.error('Exception in addToMyWatchLater:', err);
+            console.error('Exception in addToMyWatchLater:', JSON.stringify(err, Object.getOwnPropertyNames(err)));
+            // Also try logging it normally as it might be an Error object
+            console.error(err);
             btnElement.textContent = '!';
-            btnElement.title = err.message;
+            btnElement.title = err.message || 'Error occurred';
             return false;
         }
     }
 
     // Save All button handler
+    // Save All button handler
     addAllBtn.addEventListener('click', async () => {
+        addAllBtn.textContent = 'Authenticating...';
+
+        // 1. Ensure Auth First (Single Serial Call) to prevent race conditions
+        try {
+            if (!cachedToken) {
+                await getAuthToken(true);
+            }
+        } catch (e) {
+            console.error("Auth failed before batch", e);
+            addAllBtn.textContent = 'Auth Failed';
+            setTimeout(() => updateButtons(), 2000);
+            return;
+        }
+
         addAllBtn.textContent = 'Saving...';
         let successCount = 0;
         let failCount = 0;
-
         const videosToProcess = [...detectedVideos];
+        const successfulTabIds = new Set();
 
-        for (const video of videosToProcess) {
+        // 2. Parallel Execution
+        const promises = videosToProcess.map(async (video) => {
             const btn = document.querySelector(`button[data-tab-id="${video.tabId}"]`);
             const card = document.querySelector(`.video-card[data-tab-id="${video.tabId}"]`);
 
             if (btn && !btn.disabled) {
+                // Pass the token we definitely have now? 
+                // addToMyWatchLater will use cachedToken automatically.
                 const success = await addToMyWatchLater(video.id, btn);
+
                 if (success) {
                     successCount++;
-                    browserAPI.tabs.remove(video.tabId);
+                    successfulTabIds.add(video.tabId);
+                    try {
+                        await browserAPI.tabs.remove(video.tabId);
+                    } catch (e) {
+                        console.log('Tab already closed or invalid:', video.tabId);
+                    }
                     if (card) card.remove();
-                    detectedVideos = detectedVideos.filter(v => v.tabId !== video.tabId);
                 } else {
                     failCount++;
                 }
-                addAllBtn.textContent = `Saving... (${successCount}/${videosToProcess.length})`;
+
+                // Update UI progress (atomic update)
+                addAllBtn.textContent = `Saving... (${successCount + failCount}/${videosToProcess.length})`;
             }
-        }
+        });
+
+        // Wait for all requests to finish
+        await Promise.all(promises);
+
+        // 3. Cleanup Global State
+        detectedVideos = detectedVideos.filter(v => !successfulTabIds.has(v.tabId));
 
         if (failCount > 0) {
             addAllBtn.textContent = `Done: ${successCount} saved, ${failCount} failed`;
@@ -374,6 +538,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         setTimeout(() => {
             if (detectedVideos.length > 0) {
+                updateButtons();
                 addAllBtn.textContent = 'Save All to Watch Later';
             } else {
                 addAllBtn.textContent = 'All done!';

@@ -22,18 +22,45 @@ body {
 }
 
 header {
-  padding: 1rem;
+  padding: 0.8rem 1rem;
   background-color: #202020;
   border-bottom: 1px solid #3d3d3d;
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  /* Align to top so title+error stack nicely */
+}
+
+.header-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  /* Take available width */
 }
 
 h1 {
   margin: 0;
   font-size: 1.2rem;
   font-weight: 600;
+}
+
+/* Compact error message for header */
+.error-container {
+  background-color: transparent;
+  color: #ff4444;
+  /* Red text for visibility on dark BG */
+  padding: 0;
+  margin: 0;
+  border: none;
+  font-size: 11px;
+  text-align: left;
+}
+
+.error-container a {
+  color: #ff8888;
+  text-decoration: underline;
+  margin-left: 5px;
 }
 
 .tab-list {
@@ -132,12 +159,24 @@ button#add-all-btn.active {
   margin-top: 2rem;
 }
 
-.debug-info {
-  padding: 0.8rem;
-  margin: 0.5rem;
-  background-color: #1a1a2e;
-  border: 1px solid #3d3d3d;
+/* Error container */
+.error-container {
+  background-color: #ffeba1;
+  color: #856404;
+  padding: 10px;
+  margin: 10px 1rem;
   border-radius: 4px;
-  font-size: 0.75rem;
-  color: #ffcc00;
+  font-size: 13px;
+  border: 1px solid #ffeeba;
+  text-align: center;
+}
+
+.error-container a {
+  color: #856404;
+  text-decoration: underline;
+  font-weight: bold;
+}
+
+.error-container.hidden {
+  display: none;
 }
