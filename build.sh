@@ -38,6 +38,11 @@ copy_shared() {
             cp -r "$SOURCE_DIR/$item" "$target_dir/"
         fi
     done
+    
+    # Copy config.json if it exists (it's essential for Firefox)
+    if [ -f "$SOURCE_DIR/config.json" ]; then
+        cp "$SOURCE_DIR/config.json" "$target_dir/"
+    fi
 }
 
 # Build Chrome version

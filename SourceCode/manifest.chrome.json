@@ -32,7 +32,7 @@
         "default_icon": {
             "16": "assets/icon16.png",
             "48": "assets/icon48.png",
-            "128": "assets/icon128.png"
+            "128": "assets/icon128.jpeg"
         }
     },
     "background": {
@@ -41,7 +41,7 @@
     "icons": {
         "16": "assets/icon16.png",
         "48": "assets/icon48.png",
-        "128": "assets/icon128.png"
+        "128": "assets/icon128.jpeg"
     },
     "oauth2": {
         "client_id": "465282825902-mcrroh384fiam3956hjs1tnuj2r1shld.apps.googleusercontent.com",

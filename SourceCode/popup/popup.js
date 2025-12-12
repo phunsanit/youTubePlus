@@ -33,6 +33,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     `;
     }
 
+    // Load token from storage on startup
+    browserAPI.storage.local.get(['oauth_token'], (result) => {
+        if (result.oauth_token) {
+            cachedToken = result.oauth_token;
+        }
+    });
+
     // Function to extract video ID from URL
     function getVideoId(url) {
         const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
@@ -70,8 +77,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             const card = document.createElement('div');
             card.className = 'video-card';
             card.dataset.tabId = video.tabId;
+            // Use i.ytimg.com and default.jpg for maximum compatibility
             card.innerHTML = `
-        <img class="video-thumb" src="https://img.youtube.com/vi/${video.id}/default.jpg" alt="Thumbnail">
+        // Use hqdefault which is generally available and better quality
+        <img class="video-thumb" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="Thumbnail">
         <div class="video-info">
           <div class="video-title" title="${video.title}">${video.title}</div>
           <div class="video-channel">Detected</div>
@@ -80,12 +89,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       `;
             tabList.appendChild(card);
 
+            // CSP-compliant error handler with multiple fallbacks
+            const img = card.querySelector('.video-thumb');
+            img.addEventListener('error', (e) => {
+                // Try hqdefault if mqdefault fails, then fallback to icon
+                if (e.target.src.includes('mqdefault.jpg')) {
+                    e.target.src = `https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`;
+                } else if (e.target.src.includes('hqdefault.jpg')) {
+                    e.target.src = '../assets/icon48.png';
+                } else {
+                    e.target.src = '../assets/icon48.png';
+                }
+            });
+
             card.querySelector('.add-btn').addEventListener('click', async (e) => {
                 const result = await addToMyWatchLater(video.id, e.target);
                 if (result) {
                     browserAPI.tabs.remove(video.tabId);
                     card.remove();
                     detectedVideos = detectedVideos.filter(v => v.tabId !== video.tabId);
+                    updateButtons();
                 }
             });
         });
@@ -95,6 +118,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (detectedVideos.length > 0) {
             addAllBtn.removeAttribute('disabled');
             addAllBtn.classList.add('active');
+        } else {
+            addAllBtn.setAttribute('disabled', 'true');
+            addAllBtn.classList.remove('active');
         }
     }
 
@@ -117,6 +143,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function getAuthTokenFirefox(interactive) {
         return new Promise((resolve, reject) => {
+            // Always use cached if available and not forcing interactive
             if (cachedToken && !interactive) {
                 resolve(cachedToken);
                 return;
@@ -128,14 +155,21 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
 
+            // Use native API
             const redirectUrl = browser.identity.getRedirectURL();
             const scopes = 'https://www.googleapis.com/auth/youtube.force-ssl';
+
+            console.log('Firefox OAuth Debug:');
+            console.log('- Client ID:', clientId);
+            console.log('- Redirect URL:', redirectUrl);
 
             const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth' +
                 `?client_id=${encodeURIComponent(clientId)}` +
                 `&response_type=token` +
                 `&redirect_uri=${encodeURIComponent(redirectUrl)}` +
                 `&scope=${encodeURIComponent(scopes)}`;
+
+            console.log('- Launching Auth URL:', authUrl);
 
             browser.identity.launchWebAuthFlow({
                 url: authUrl,
@@ -146,11 +180,21 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const token = params.get('access_token');
                 if (token) {
                     cachedToken = token;
+                    // Persist token
+                    browserAPI.storage.local.set({ oauth_token: token });
                     resolve(token);
                 } else {
                     reject(new Error('No token in response'));
                 }
-            }).catch(reject);
+            }).catch(err => {
+                // Only log error if it was an interactive attempt or if it's a different kind of error
+                if (interactive) {
+                    console.error('Firefox OAuth error:', err);
+                } else {
+                    console.log('Silent auth failed, fallback to interactive needed.');
+                }
+                reject(err);
+            });
         });
     }
 
@@ -173,7 +217,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             const existing = data.items?.find(p => p.snippet.title === PLAYLIST_NAME);
             if (existing) {
                 myWatchLaterPlaylistId = existing.id;
-                console.log('Found existing playlist:', myWatchLaterPlaylistId);
                 return myWatchLaterPlaylistId;
             }
         }
@@ -202,7 +245,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (createResponse.ok) {
             const data = await createResponse.json();
             myWatchLaterPlaylistId = data.id;
-            console.log('Created new playlist:', myWatchLaterPlaylistId);
             return myWatchLaterPlaylistId;
         }
 
@@ -213,9 +255,42 @@ document.addEventListener('DOMContentLoaded', async () => {
     async function addToMyWatchLater(videoId, btnElement) {
         try {
             btnElement.textContent = '...';
+            console.log(`Adding video ${videoId} to playlist...`);
 
-            const token = await getAuthToken(true);
+            let token;
+
+            // OPTIMIZATION: Check if we already have a token in memory
+            // If we don't, go STRAIGHT to interactive mode to preserve the User Gesture (click).
+            // Attempting silent auth first (which involves a network call) can expire the user gesture
+            // causing Firefox to block the subsequent interactive popup.
+            if (cachedToken) {
+                try {
+                    console.log('Using cached token:', cachedToken);
+                    token = cachedToken;
+                    // Validate it quickly or assume valid? 
+                    // Let's try to use it. If 401, we'll handle it.
+                } catch (e) {
+                    token = await getAuthToken(true);
+                }
+            } else {
+                console.log('No cached token, forcing interactive auth to preserve user gesture');
+                token = await getAuthToken(true);
+                console.log('Token obtained (interactive)');
+            }
+
             const playlistId = await getOrCreatePlaylist(token);
+            console.log('Target Playlist ID:', playlistId);
+
+            const payload = {
+                snippet: {
+                    playlistId: playlistId,
+                    resourceId: {
+                        kind: 'youtube#video',
+                        videoId: videoId
+                    }
+                }
+            };
+            console.log('Sending payload:', JSON.stringify(payload));
 
             const response = await fetch(
                 'https://www.googleapis.com/youtube/v3/playlistItems?part=snippet',
@@ -225,37 +300,40 @@ document.addEventListener('DOMContentLoaded', async () => {
                         'Authorization': `Bearer ${token}`,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        snippet: {
-                            playlistId: playlistId,
-                            resourceId: {
-                                kind: 'youtube#video',
-                                videoId: videoId
-                            }
-                        }
-                    })
+                    body: JSON.stringify(payload)
                 }
             );
 
+            console.log('API Response Status:', response.status);
+
             if (response.ok) {
+                const data = await response.json();
+                console.log('Success:', data);
                 btnElement.textContent = '✓';
                 btnElement.style.color = '#00ff00';
                 btnElement.disabled = true;
                 return true;
             } else {
                 const error = await response.json();
-                console.error('API Error:', error);
-                btnElement.textContent = '!';
-                btnElement.title = error.error?.message || 'Error';
+                console.error('API Error Details:', error);
+                console.error('Error Message:', error.error?.message);
 
+                // If token invalid, clear cache
                 if (response.status === 401) {
+                    console.log('Token expired/invalid (401). Clearing cache.');
                     cachedToken = null;
+                    browserAPI.storage.local.remove('oauth_token');
                     if (isChrome) chrome.identity.removeCachedAuthToken({ token });
+
+                    // Optional: could retry once here, but maybe too complex for now
                 }
+
+                btnElement.textContent = '!';
+                btnElement.title = error.error?.message || 'Error ' + response.status;
                 return false;
             }
         } catch (err) {
-            console.error('Error:', err);
+            console.error('Exception in addToMyWatchLater:', err);
             btnElement.textContent = '!';
             btnElement.title = err.message;
             return false;
