@@ -7,7 +7,6 @@ Thumbs.db
 
 # IDE
 .idea/
-.vscode/
 *.sublime-*
 
 # Build outputs

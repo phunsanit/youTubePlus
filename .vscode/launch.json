@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Chrome: Debug Extension",
+      "type": "chrome",
+      "request": "launch",
+      "url": "https://www.youtube.com",
+      "webRoot": "${workspaceFolder}/dist/chrome",
+      "runtimeArgs": [
+        "--load-extension=${workspaceFolder}/dist/chrome",
+        "--auto-open-devtools-for-tabs"
+      ],
+      "preLaunchTask": "build-extension"
+    },
+    {
+      "name": "Firefox: Debug Extension",
+      "type": "firefox",
+      "request": "launch",
+      "reAttach": true,
+      "url": "https://www.youtube.com",
+      "webRoot": "${workspaceFolder}/dist/firefox",
+      "addonPath": "${workspaceFolder}/dist/firefox",
+      "preLaunchTask": "build-extension"
+    }
+  ]
+}
